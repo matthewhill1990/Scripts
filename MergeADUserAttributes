@@ -1,0 +1,82 @@
+#########################################################
+#
+# Name: Merge-UserAttributes.ps1
+# Author: Tony Murray
+# Version: 1.0
+# Date: 12/06/2013
+# Comment: PowerShell 2.0 script to copy a fixed set of
+# attributes from one user object to another
+#
+#########################################################
+
+# Import the AD module
+ipmo activedirectory
+
+#### Function to test the existence of an AD user
+function Test-ADUser() {
+   [CmdletBinding(ConfirmImpact="Low")]
+   Param (
+      [Parameter(Mandatory=$true,
+                 Position=0,
+                 ValueFromPipeline=$true,
+                 HelpMessage="Identity of the AD object to verify if exists or not."
+                )]
+      [Object] $Identity
+   )
+   trap [Exception] {
+      return $false
+   }
+   $auxObject = Get-ADUser -Identity $Identity -Server $dc
+   return $true
+}
+####
+
+#### Global variables
+$dc = (Get-ADDomainController).hostname
+
+# Create an array of the attributes we want to copy
+$atts2copy = @("ipphone","mobile","facsimileTelephoneNumber",
+"telephonenumber","streetAddress","st","l","c","physicalDeliveryOfficeName",
+"description","department","postofficebox","thumbnailPhoto","manager")
+
+# Users to merge 
+$source = "berthaf"
+$target = "GAccess"
+
+write-host "Working on source target pair: $source --> $target"
+if ( (Test-ADUser $source) -and (Test-ADUser $target) ) { $greenlight = $true }
+if ($greenlight) {
+    $srcatts = Get-ADUser -Identity $source -pr * -Server $dc
+    # Create a hashtable to store the attributes
+    $replaceHashTable = New-Object HashTable
+    # Add the attributes one-by-one to the hashtable
+    foreach ($att2copy in $atts2copy){
+        $attvalue = $srcatts.$att2copy
+        if ($attvalue) {
+            if ( ($attvalue.gettype()).name -eq "ADPropertyValueCollection") {
+                # We have a collection which need to convert to an array
+                # otherwise the set-aduser cmdlet doesn't set the value
+                $attarray = @($attvalue)
+                $replaceHashTable.Add($att2copy,$attarray)
+            } # end if
+            else {
+                $replaceHashTable.Add($att2copy,$attvalue)
+            } # end else
+        } # end if
+        Remove-Variable -ErrorAction SilentlyContinue -Name att2copy
+        Remove-Variable -ErrorAction SilentlyContinue -Name attvalue
+        Remove-Variable -ErrorAction SilentlyContinue -Name attarray
+    } #end foreach
+    # Set the attributes on the target user
+    write-host "Setting attributes on target"
+    $replaceHashTable
+    Set-ADUser -Identity $target -Replace $replaceHashTable -Server $dc
+    } # end if
+Else {
+    Write-Host "No match found for either $source or $target - please check CSV"
+} # end else
+Remove-Variable -ErrorAction SilentlyContinue -Name source
+Remove-Variable -ErrorAction SilentlyContinue -Name target
+Remove-Variable -ErrorAction SilentlyContinue -Name greenlight
+Remove-Variable -ErrorAction SilentlyContinue -Name srceatts
+$replaceHashTable = @{}
