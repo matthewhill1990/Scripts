@@ -1,0 +1,405 @@
+# system_report - (C) 2015 Patrick Lambert - http://dendory.net
+#
+# This should be run on the Task Scheduler every hour as a local administrator. 
+# Comment out any section you don't want. The only resource intensive one seems to be Windows Updates.
+# The AntiVirus/AntiMalware sections only work on workstations, they will return empty strings on Windows Server.
+# Look near the bottom of the script to configure alarm report emails / notifications.
+#
+# The report will be saved in this file:
+param([string]$File = "C:\Temp\Reports\$(((get-date).ToUniversalTime()).ToString("hhmmhhTddMM"))$env:COMPUTERNAME.html") 
+mkdir C:\Temp\Reports -ErrorAction SilentlyContinue
+
+"<html>
+<head>
+<link rel=stylesheet href=https://maxcdn.bootstrapcdn.com/bootstrap/3.3.2/css/bootstrap.min.css>
+<title>$env:COMPUTERNAME</title>
+<style>
+html, body
+{
+width: 100% !important;
+font-family: tahoma, arial;
+font-size: 14px;
+margin: 5px;
+padding: 0px;
+color: #2E1E2E;
+}
+table
+{
+border-collapse: collapse;
+    width: 100%;
+}
+th
+{
+border: 1px solid #8899AA;
+padding: 3px 7px 2px 7px;
+font-size: 1.1em;
+text-align: left;
+padding-top: 5px;
+padding-bottom: 4px;
+background-color: #AABBCC;
+color: #ffffff;
+}
+td
+{
+border: 1px solid #8899AA;
+padding: 3px 7px 2px 7px;
+    overflow: hidden;
+}
+h2
+{
+    text-align: center;
+font-size: 22px;
+    text-shadow: 1px 1px 1px rgba(150, 150, 150, 0.5);
+}
+h1
+{
+    margin-top: 20px;
+    text-align: center;
+font-size: 25px;
+    text-shadow: 1px 1px 1px rgba(150, 150, 150, 0.5);
+}
+pre {
+    white-space: pre-wrap;
+    white-space: -moz-pre-wrap;
+    white-space: -pre-wrap;
+    white-space: -o-pre-wrap;
+    word-wrap: break-word;
+}
+#sysinfo
+{
+    width: 50% !important;
+    float: left;
+    margin-bottom: 0px;
+}
+#action
+{
+    width: 50% !important;
+    float: right;
+}
+#users
+{
+    width: 50% !important;
+    float: right;
+}
+#menu 
+{
+    position: fixed;
+    right: 0;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 25px;
+    background: #AABBCC;
+    color: #FFFFFF;
+    text-align: center;
+    overflow: hidden;
+}
+#menu a
+{
+    color: #FFFFFF;
+    font-weight: bold;
+}
+@media screen and (max-width: 1010px)
+{
+    #sysinfo
+    {
+        float: none;
+        margin-bottom: 20px;
+        width: 100% !important;
+    }
+    #action
+    {
+        width: 100% !important;
+        float: none;
+    }
+    #users
+    {
+        width: 100% !important;
+        float: none;
+    }
+}
+</style>
+</head>
+<body>
+<div id='menu'>
+<a href=#sysinfo>System</a> | <a href=#users>Users</a> | <a href=#disks>Disks</a> | <a href=#updates>Updates</a> | <a href=#apps>Apps</a> | <a href=#network>Network</a>| <a href=#power>Power</a> | <a href=#processes>Processes</a> | <a href=#services>Services</a>
+</div>
+<a name='sysinfo'></a><h1>$env:COMPUTERNAME System Report</h1>
+" > $File
+
+### Query Functions
+
+
+function Get-PowerScheme ([Switch]$Active) 
+{
+powercfg /list | 
+foreach { 
+if ( $_ -match "GUID.*?:\s+(?<GUID>\S*)\s+\((?<Name>.*?)\)\s*(?<Active>\*?)" )
+{
+$property = @{
+GUID = $matches.GUID
+Name = $matches.Name
+Active = [bool]$matches.Active
+}
+New-Object -TypeName psObject -Property $property 
+}
+} | Foreach { 
+if($Active) { 
+if ( $_.Active ) { $_ }
+}	
+else {$_}
+} 
+}
+#get active schema
+#Get-PowerScheme -Active | Format-List
+
+function Get-ACDCValue ($data, $name) 
+{
+#gets the values of AC and DC setting in scheme settings
+$hexNumber = "0x[0-9a-f]{8}"
+$values = $data -split "`n" | where { $_ -Like '*Index*' -and $_ -match $hexNumber}
+if ($values.Count -ne 2) { throw "Incorrect number of values found ($($values.Count)), there should be 2 values"}
+#here I have the AC and DC values, respectively
+$AC,$DC = $values -replace ".*($hexNumber)\s*",'$1' -replace "^0x"
+New-Object -TypeName psObject -Property @{ Name = $name; AC = [Convert]::ToInt32($AC,16); DC = [Convert]::ToInt32($DC,16) }
+}
+
+#Get values for the high performance schema
+$PowerSleep = Get-ACDCValue -Name 'Seconds till Sleep' -Data (powercfg.exe query SCHEME_MIN SUB_SLEEP STANDBYIDLE )
+$PowerHibernate = Get-ACDCValue -Name 'Seconds till Hibernate' -Data ( powercfg.exe query SCHEME_MIN SUB_SLEEP HIBERNATEIDLE)
+$PowerVideo = Get-ACDCValue -Name 'Seconds till Display turns off' -Data (powercfg.exe query SCHEME_MIN SUB_VIDEO VIDEOIDLE )
+$PowerDisk = Get-ACDCValue -Name 'Seconds till Disk goes Idle' (powercfg.exe query SCHEME_MIN SUB_DISK DISKIDLE )
+$PowerUASleep = Get-ACDCValue -Name 'Seconds till Computer is Idle' (powercfg.exe query SCHEME_MIN SUB_SLEEP UNATTENDSLEEP)
+
+
+### End Functions
+
+Write-Output "Fetching data:"
+Write-Output "* Processor"
+$processor = Get-WmiObject win32_processor
+Write-Output "* System"
+$sysinfo = Get-WmiObject win32_computersystem
+Write-Output "* BIOS"
+$bios = Get-WmiObject -Class win32_bios
+Write-Output "* Operating System"
+$os = Get-WmiObject win32_operatingsystem
+Write-Output "* Users"
+$users = Get-WmiObject win32_systemusers
+
+"<table id='sysinfo'><tr><th colspan=2>System Information</th></tr>" >> $File
+"<tr><td>Computer Name</td><td>" + $sysinfo.Name + "</td></tr>" >> $File
+"<tr><td>Computer Type</td><td>" + $sysinfo.SystemType + "</td></tr>" >> $File
+"<tr><td>Computer Manufacturer</td><td>" + $sysinfo.Manufacturer + "</td></tr>" >> $File
+"<tr><td>Computer Model</td><td>" + $sysinfo.Model + "</td></tr>" >> $File
+"<tr><td>CPU Information</td><td>" + $processor.Name + "</td></tr>" >> $File
+"<tr><td>Installed RAM</td><td>" + [math]::Round($sysinfo.TotalPhysicalMemory / 1000000000) + " GB</td></tr>" >> $File
+"<tr><td>BIOS Manufacturer</td><td>" + $bios.Manufacturer + "</td></tr>" >> $File
+"<tr><td>BIOS Name</td><td>" + $bios.Name + "</td></tr>" >> $File
+"<tr><td>BIOS Serial</td><td>" + $bios.SerialNumber + "</td></tr>" >> $File
+"<tr><td>Hostname</td><td>" + $sysinfo.DNSHostName + "</td></tr>" >> $File
+"<tr><td>Domain</td><td>" + $sysinfo.Domain + "</td></tr>" >> $File
+"<tr><td>Operating System</td><td>" + $os.Caption + " (" + $os.OSArchitecture + ")</td></tr>" >> $File
+"<tr><td>Build Number</td><td>" + (Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion" |Select -ExpandProperty CurrentBuildNumber) + "</td></tr>" >> $File
+"<tr><td>Product ID</td><td>" + (Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\Software\Microsoft\Windows NT\CurrentVersion" |Select -ExpandProperty ProductId) + "</td></tr>" >> $File
+"<tr><td>Local Users</td><td>" >> $File
+ForEach ($u in $users) { $u.PartComponent -match ".*Name=(?<username>.*),.*Domain=(?<domain>.*).*" | Out-Null; $matches.username >> $File; " " >> $File }
+"</td></tr>" >> $File
+"</table>" >> $File
+
+Write-Output "* Active User"
+"<table id='sysinfo'><tr><th colspan=2>Active User</th></tr>" >> $File
+"<a name='users'></a><td>Active User</td><td>" + (Get-WmiObject -Class Win32_Computersystem | Select-Object  * -ExpandProperty Username ) >> $File
+"</td></tr>" >> $File
+"</table>" >> $File
+
+Write-Output "* Local Admins"
+$group = Get-WmiObject -Class win32_group -filter 'Name = "Administrators"';$localadmins = $group.GetRelated('Win32_UserAccount')
+"<table id='sysinfo'><tr><th colspan=2>Local Admins</th></tr>" >> $File
+"<a name='users'></a><td>Local Admins</td><td>" + ($localadmins | Select-Object * -ExpandProperty Caption) >> $File
+"</td></tr>" >> $File
+"</table>" >> $File
+
+Write-Output "* Action Center"
+$as = Get-WmiObject -Namespace "root\SecurityCenter2" -Class AntiSpywareProduct
+$av = Get-WmiObject -Namespace "root\SecurityCenter2" -Class AntiVirusProduct
+$fw_std = Get-ItemProperty "HKLM:System\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\StandardProfile" | select -ExpandProperty EnableFirewall
+$fw_dmn = Get-ItemProperty "HKLM:System\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\DomainProfile" | select -ExpandProperty EnableFirewall
+$fw_pub = Get-ItemProperty "HKLM:System\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\PublicProfile" | select -ExpandProperty EnableFirewall
+#Write-Output "* Windows Updates"
+#$lastupd = Get-HotFix | Where-Object {$_.InstalledOn} | Sort-Object -Property InstalledOn | Select -Last 1 | Select -ExpandProperty InstalledOn
+#$UpdateSession = New-Object -ComObject Microsoft.Update.Session
+#$UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+#$wu = $UpdateSearcher.Search("IsInstalled=0")
+Write-Output "* System Load"
+$cpuload = Get-Counter -Counter "\Processor(*)\% Processor Time" | Select -ExpandProperty CounterSamples | Select -ExpandProperty CookedValue | Measure-Object -Average | Select -ExpandProperty Average
+$freemem = Get-Counter -Counter "\Memory\Available MBytes" | Select -ExpandProperty CounterSamples | Select -ExpandProperty CookedValue
+$freemem = $freemem / 1000
+$netload = [math]::round(((Get-Counter -Counter "\Network Interface(*)\Bytes Total/sec" -SampleInterval 1 -MaxSamples 3 | Select -ExpandProperty CounterSamples | Select -ExpandProperty CookedValue |Measure -Maximum |Select -ExpandProperty Maximum) / 1000),1)
+
+"<table id='action'><tr><th colspan=2>Action Center</th></tr>" >> $File
+"<tr><td>Anti-Virus Software</td><td>" + $av.displayName + " " + $av.VersionNumber + "</td></tr>" >> $File
+"<tr><td>Anti-Spyware Software</td><td>" + $as.displayName + " " + $as.VersionNumber + "</td></tr>" >> $File
+"<tr><td>Firewall Status</td><td>Domain: " + (&{If($fw_dmn -eq 1) {"On"} Else {"<font color=red>Off</font>"}}) + ", Private: " + (&{If($fw_std -eq 1) {"On"} Else {"<font color=red>Off</font>"}}) + ", Public: " + (&{If($fw_pub -eq 1) {"On"} Else {"<font color=red>Off</font>"}}) + "</td></tr>" >> $File
+"<tr><td>Processor Load</td><td>" + (&{If($cpuload -lt 80) {[math]::Round($cpuload,2)} Else {"<font color=red>"+[math]::Round($cpuload,2)+"</font>"}}) + "%</td></tr>" >> $File
+"<tr><td>Network Load</td><td>" + $netload + " KBytes/s</td></tr>" >> $File
+"<tr><td>Free Memory</td><td>" + (&{If($freemem -gt 0.4) {"$freemem GB"} Else {"<font color=red>$freemem GB</font>"}}) + "</td></tr>" >> $File
+"<tr><td>Last Boot</td><td>" + $os.ConvertToDateTime($os.LastBootUpTime) + " (" + (&{If($sysinfo.BootupState -eq "Normal boot") {$sysinfo.BootupState} Else {"<font color=red>"+$sysinfo.BootupState+"</font>"}}) + ")</td></tr>" >> $File
+#"<tr><td>Last Windows Update</td><td>" + $lastupd + (&{If(Get-ChildItem "HKLM:SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing" | Where {$_.PSChildName -eq "RebootPending"}) { " <font color=red>(Reboot pending)</font>" }}) + "</td></tr>" >> $File
+#"<tr><td>Available Critical Updates</td><td>" >> $File
+#$criticals = $wu.updates | where { $_.MsrcSeverity -eq "Critical" }
+#ForEach($critical in $criticals)
+#{
+#    "<font color=red>" >> $File
+#    $critical | Select -ExpandProperty Title >> $File
+#    "</font><br>" >> $File 
+#}
+"</td></tr>" >> $File
+"</table>" >> $File
+
+
+Write-Output "* Network"
+$IPInterfaces = Get-WmiObject -Class 'Win32_NetworkAdapterConfiguration' -Filter 'IPEnabled = True' 
+"<table id='action'><tr><th colspan=2>Network Addresses</th></tr>" >> $File
+    ForEach($IPInterface in $IPInterfaces)
+    {
+        $InterfaceName = $IPInterface.Description
+        $InterfaceIP = $IPInterface.IPAddress
+      	"<tr><td><a name='network'></a>$InterfaceName</td><td>$InterfaceIP</td></tr>" >> $File
+    }
+
+"</td></tr>" >> $File
+"</table>" >> $File
+
+
+Write-Output "* Power Plans"
+$PowerPlans = Get-CimInstance -Namespace "root\cimv2\power" -class Win32_PowerPlan|Select-Object ElementName,@{l='GUID';e={$_.instanceid.substring(20)}},'IsActive'
+"<table id='action'><tr><th colspan=2>Power Plans</th></tr>" >> $File
+    ForEach($PowerPlan in $PowerPlans)
+    {
+        $PowerPlanName = $PowerPlan.ElementName
+        $PowerPlanStatus = $PowerPlan.IsActive
+      	"<tr><td><a name='power'></a>$PowerPlanName</td><td>$PowerPlanStatus</td></tr>" >> $File
+    }
+"</table>" >> $File
+
+
+Write-Output "* Power Timeout Settings"
+$PowerhibernateName = $PowerHibernate.Name;$PowerhibernateAC = $PowerHibernate.AC;$PowerhibernateDC = $PowerHibernate.DC
+$PowersleepName = $PowerSleep.Name;$PowersleepAC = $PowerSleep.AC;$PowersleepDC = $PowerSleep.DC
+$PowervideoName = $PowerVideo.Name;$PowervideoAC = $PowerVideo.AC;$PowervideoDC = $PowerVideo.DC
+$PowerdiskName = $PowerDisk.Name;$PowerdiskAC = $PowerDisk.AC;$PowerdiskDC = $PowerDisk.DC
+"<table id='action'><tr><th colspan=2>Power Sleep Settings</th></tr>" >> $File
+"<tr><a name='power'></a><td>$PowerhibernateName</td><td>Mains: ($PowerhibernateAC) Battery: ($PowerhibernateDC)</td></tr>" >> $File
+"<tr><a name='power'></a><td>$PowersleepName</td><td>Mains : ($PowersleepAC) Battery: ($PowersleepDC)</td></tr>" >> $File
+"<tr><a name='power'></a><td>$PowervideoName</td><td>Mains : ($PowervideoAC) Battery: ($PowervideoDC)</td></tr>" >> $File
+"<tr><a name='power'></a><td>$PowerdiskName</td><td>Mains : ($PowerdiskAC) Battery: ($PowerdiskDC)</td></tr>" >> $File
+"</td></tr>" >> $File
+"</table>" >> $File
+
+
+Write-Output "* Disks"
+"<a name='disks'></a><br></br><h2 align=`"center`">Disk Drives</h2>" >> $File
+$disks = Get-WmiObject -Class win32_logicaldisk
+"<table><tr><th>Drive</th><th>Type</th><th>Size</th><th>Free Space</th></tr>" >> $File
+ForEach($d in $disks)
+{
+    $drive = $d.Name
+    $type = $d.Description
+    $size = [math]::Round($d.Size / 1000000000,1)
+    $freespace = [math]::Round($d.FreeSpace / 1000000000,1)
+    If($freespace -le 1 -And $freespace -ne 0) { "<tr><td>$drive</td><td>$type</td><td>$size GB</td><td><font color=red>$freespace GB</font></td></tr>" >> $File }
+    Else { "<tr><td>$drive</td><td>$type</td><td>$size GB</td><td>$freespace GB</td></tr>" >> $File }
+}
+"</table>" >> $File
+
+Write-Output "* Disk Partitions"
+"<a name='disks'></a><h2>Disk Partitions</h2>" >> $File
+Get-Volume | Select-Object "DriveLetter", "FileSystemLabel", "FileSystemType", @{Name="Total Size (GB)"; Expression={"{0:N1}" -F ($_.Size/1GB)}}, @{Name="Free Space (GB)"; Expression={"{0:N1}" -F ($_.SizeRemaining/1GB)}}, @{Name="Free Space %"; Expression={"{0:N1}" -F (($_.SizeRemaining/$_.Size)*100)}} | ConvertTo-Html -Fragment >> $File
+
+
+
+Write-Output "* OneDrive Sync Details"
+"<a name='disks'></a><h2>OneDrive Sync Details</h2>" >> $File
+Start-ScheduledTask "OneDrivequery";$ODStatus = Import-Csv -Path C:\Deployments\OneDrive\$env:COMPUTERNAME.txt -Delimiter "`t" -Header 'One Drive Sync Details'| ConvertTo-Html -Fragment >> $File
+
+
+Write-Output "* Missing Windows Updates"
+Set-Service wuauserv -StartupType Manual -ErrorAction SilentlyContinue;Start-Service wuauserv -ErrorAction SilentlyContinue;mkdir C:\Deployments\Updates\Logs\ -ErrorAction SilentlyContinue ;C:\Deployments\Updates\ABC-Update.exe /A:List /S:MSUpdate  /D: *,-21 /T:Driver,Software /C:Application,Connectors,CriticalUpdates,DefinitionUpdates,FeaturePacks,Guidance,SecurityUpdates,ServicePacks,Tools,UpdateRollups,Updates /Log:C:\Deployments\Updates\Logs\$env:COMPUTERNAME.txt; Set-Service wuauserv -StartupType Disabled -ErrorAction SilentlyContinue; Stop-Service wuauserv -ErrorAction SilentlyContinue
+"<a name='updates'></a><h2>Missing Windows Updates</h2>" >> $File
+Select-String -Path C:\Deployments\Updates\Logs\$env:COMPUTERNAME.txt -Pattern "Missing" -Context 1,1 | Select-Object -ExpandProperty Line | Out-File -FilePath C:\Deployments\Updates\Logs\Missing.txt ; Import-Csv -Path C:\Deployments\Updates\Logs\Missing.txt -Delimiter "`t" -Header 'Missing Windows Updates'| ConvertTo-Html -Fragment >> $File
+
+Write-Output "* Third Party Applications"
+"<a name='apps'></a><h2>Third Party Applications</h2>" >> $File
+$Apps = Get-WmiObject -Class Win32_Product | Select-Object -Property Name, Version;$TrustedApps = "Adobe", "Windows", "Office", "Microsoft", "Sophos", "SQL", "Bonjour", "Google", "Java", "Panorama9" -join "|";$AppResults = $Apps | Where-Object Name -notmatch $TrustedApps; $AppResults | Sort-Object Name| ConvertTo-Html -Fragment >> $File
+
+Write-Output "* System Processes"
+"<a name='processes'></a><h2>Running System Processes</h2>" >> $File
+Get-WmiObject -Class win32_process | Select-Object * | Where-Object 'SessionId' -EQ '0' |  Sort-Object -Property WorkingSetSize -Descending | Select-Object -First 15 @{Name='ID';Expression={$_.ProcessId}},@{Name='Name';Expression={$_.ProcessName}},@{Name='Memory Usage (MB)';Expression={[math]::Round($_.WorkingSetSize / 1000000, 3)}}| ConvertTo-Html -Fragment >> $File
+
+
+Write-Output "* Processes"
+"<a name='processes'></a><h2>Running User Processes</h2>" >> $File
+Get-WmiObject -Class win32_process | Select-Object * | Where-Object 'SessionId' -NotMatch '0' |  Sort-Object -Property WorkingSetSize -Descending | Select-Object -First 15 @{Name='ID';Expression={$_.ProcessId}},@{Name='Name';Expression={$_.ProcessName}},@{Name='Memory Usage (MB)';Expression={[math]::Round($_.WorkingSetSize / 1000000, 3)}} | ConvertTo-Html -Fragment >> $File
+
+Write-Output "* Stopped Services"
+"<a name='services'></a><h2>Stopped Services</h2>" >> $File
+Get-Service | Where-Object {$_.StartType -match "Auto"} | Where-Object {$_.Status -cnotmatch "Running"} | Sort -Property DisplayName | Select @{Name='Name';Expression={$_.DisplayName}},@{Name='Mode';Expression={$_.StartMode}},@{Name='Path';Expression={$_.PathName}},Description | ConvertTo-Html -Fragment >> $File
+
+Write-Output "* Disabled Services"
+"<a name='services'></a><h2>Disabled Services</h2>" >> $File
+Get-Service | Where-Object {$_.StartType -match "Disabled"} | Where-Object {$_.Status -cnotmatch "Stopped"} | Sort -Property DisplayName | Select @{Name='Name';Expression={$_.DisplayName}},@{Name='Mode';Expression={$_.StartMode}},@{Name='Path';Expression={$_.PathName}},Description | ConvertTo-Html -Fragment >> $File
+
+Write-Host "* Event log"
+"<a name='services'></a><h2>Logged Failures</h2>" >> $File
+$events = Get-EventLog Security -EntryType FailureAudit -After (Get-Date).AddHours(-1) -WarningAction Ignore -InformationAction Ignore
+if($events)
+{
+    ForEach($event in $events) 
+    {
+        $id = $event.InstanceID
+        $msg = $event.Message
+      	$tim = $event.TimeGenerated
+        "<tr><td>Event Audit Failure ($id)</td><td><font color=red><pre>$msg</pre>Time Generated: $tim</font></td></tr>" >> $File
+    }
+}
+"</table><div style='clear:both'></div>" >> $File
+
+$date = Get-Date
+"<p><i>Report produced: $date</i></p>" >> $File
+
+if((Get-Content $File | Select-String -Pattern "color=red"))
+{
+    Write-Output "*** Alarms were raised!"
+}
+
+# Uncomment this out to send an email:
+Send-MailMessage -From "admin@utility.something.com" -To "systemsadmin@something.com" -Subject "$env:COMPUTERNAME Weekly Report" -Body (Get-Content $File -Raw) -BodyAsHtml:$true -Attachments $File -SmtpServer smtp.utility.something.com
+
+Write-Output "Done! Report at: $File"
+
+
+### OLD
+### Write-Output "* Local Admins"
+### $group = Get-WmiObject -Class win32_group -filter 'Name = "Administrators"'
+### "<table id='users'><tr><th colspan=2>Users</th></tr>" >> $File
+### "<a name='users'></a><td>Local Admins</td><td>" + ($localadmins = $group.GetRelated('Win32_UserAccount') | Select-Object -Property Caption) >> $File
+### "</td></tr>" >> $File
+### "</table>" >> $File
+
+### Write-Output "* OneDrive Sync Details"
+### (Start-ScheduledTask "OneDrivequery");($ODStatus = Get-Content -Path C:\Deployments\OneDrive\$env:COMPUTERNAME.txt | Where-Object {$_ -notmatch "UserSID" } | Where-Object {$_ -notmatch "UserName" } | Out-File -FilePath C:\Deployments\OneDrive\Results.txt );( $ODResults = Import-Csv -Path C:\Deployments\OneDrive\Results.txt -Delimiter "`t" -Header 'OneDrive Sync Details')
+### "<table id='users'><tr><th colspan=2>OneDrive Sync Details</th></tr>" >> $File
+### "<a name='users'></a><td>OneDrive Sync Details</td><td>"+ ($ODResults) >> $File
+### "</td></tr>" >> $File
+### "</table>" >> $File
+
+### $IPInterfaces = Get-WmiObject -Class 'Win32_NetworkAdapterConfiguration' -Filter 'IPEnabled = True' | Select @{Name='Interface';Expression={$_.Description}},@{Name='IP Addresses';Expression={$_.IPAddress}}
+
+### "<a name='network'></a><td>Network Addresses</td><td>" + (Get-WmiObject -Class 'Win32_NetworkAdapterConfiguration' -Filter 'IPEnabled = True' | Select @{Name='Interface';Expression={$_.Description}},@{Name='IP Addresses';Expression={$_.IPAddress}}) >> $File
+### "<a name='network'></a><td>Network Addresses</td><td>" + ($NetworkInfo | Select-Object 'Interface','IP Addresses') >> $File
+#Get-WmiObject -Class 'Win32_NetworkAdapterConfiguration' -Filter 'IPEnabled = True' | Select @{Name='Interface';Expression={$_.Description}},@{Name='IP Addresses';Expression={$_.IPAddress}} | ConvertTo-Html -Fragment >> $File
+
+#$PowerSleep |Select-Object 'name', 'AC','DC'  |  ConvertTo-Html -Fragment >> $File
+#$PowerHibernate |Select-Object 'name', 'AC','DC'  | ConvertTo-Html -Fragment >> $File
+#$PowerVideo |Select-Object 'name', 'AC','DC'  | ConvertTo-Html -Fragment >> $File
+#$PowerDisk |Select-Object 'name', 'AC','DC'  | ConvertTo-Html -Fragment >> $File
