@@ -1,0 +1,3 @@
+Import-Module -Global \\something\Scripts$\Content\OneDriveLib.dll -Force
+Get-ODStatus | Out-File \\something\Logs$\Queries\$(((get-date).ToUniversalTime()).ToString("hhmmhhTddMM"))$env:COMPUTERNAME.txt  -NoClobber default
+mkdir C:\Deployments\OneDrive\ ;Import-Module -Global \\something\Scripts$\Content\OneDriveLib.dll -Force;Get-ODStatus | Out-File C:\Deployments\OneDrive\$env:COMPUTERNAME.txt -Encoding ascii -NoNewline -NoClobber
